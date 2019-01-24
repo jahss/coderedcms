@@ -42,12 +42,12 @@ setup(
     install_requires=[
         'django-eventtools==0.9.*',
         'django-bootstrap4',
-        'django>=1.11,<2.2',
+        'django>=2.0,<2.2',
         'geocoder>=1.38.1,<2.0',
         'icalendar==4.0.*',
         'wagtail==2.4.*',
         'wagtailfontawesome>=1.1.3,<2.0',
-        'wagtail-cache==0.2.*',
+        'wagtail-cache==0.3.*',
         'wagtail-import-export>=0.1,<0.2'
     ],
     extras_require={
