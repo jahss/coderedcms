@@ -3,14 +3,14 @@ Base and abstract pages used in CodeRed CMS.
 """
 
 import json
+import logging
 import os
-
 import geocoder
-
+from django import forms
 from django.conf import settings
 from django.core.files.uploadedfile import InMemoryUploadedFile, TemporaryUploadedFile
 from django.core.files.storage import FileSystemStorage
-from django.core.mail import send_mail, EmailMessage
+from django.core.mail import EmailMessage
 from django.core.paginator import Paginator
 from django.core.serializers.json import DjangoJSONEncoder
 from django.core.validators import MaxValueValidator, MinValueValidator
@@ -21,10 +21,11 @@ from django.template import Context, Template
 from django.template.loader import render_to_string
 from django.utils import timezone
 from django.utils.html import strip_tags
+from django.utils.safestring import mark_safe
 from django.utils.translation import ugettext_lazy as _
 from eventtools.models import BaseEvent, BaseOccurrence
 from icalendar import Event as ICalEvent
-from modelcluster.fields import ParentalKey
+from modelcluster.fields import ParentalKey, ParentalManyToManyField
 from modelcluster.tags import ClusterTaggableManager
 from taggit.models import TaggedItemBase
 from wagtail.admin.edit_handlers import (
@@ -46,6 +47,7 @@ from wagtail.contrib.forms.forms import WagtailAdminFormPageForm
 from wagtail.images.edit_handlers import ImageChooserPanel
 from wagtail.contrib.forms.models import FormSubmission
 from wagtail.search import index
+from wagtailcache.cache import WagtailCacheMixin
 
 from coderedcms import schema, utils
 from coderedcms.blocks import (
@@ -56,14 +58,20 @@ from coderedcms.blocks import (
     StructuredDataActionBlock)
 from coderedcms.fields import ColorField
 from coderedcms.forms import CoderedFormBuilder, CoderedSubmissionsListView
+from coderedcms.models.snippet_models import ClassifierTerm
 from coderedcms.models.wagtailsettings_models import GeneralSettings, LayoutSettings, SeoSettings, GoogleApiSettings
 from coderedcms.settings import cr_settings
+from coderedcms.widgets import ClassifierSelectWidget
+
+
+logger = logging.getLogger('coderedcms')
+
 
 CODERED_PAGE_MODELS = []
 
-
 def get_page_models():
     return CODERED_PAGE_MODELS
+
 
 class CoderedPageMeta(PageBase):
     def __init__(cls, name, bases, dct):
@@ -90,13 +98,14 @@ class CoderedTag(TaggedItemBase):
         verbose_name = _('CodeRed Tag')
     content_object = ParentalKey('coderedcms.CoderedPage', related_name='tagged_items')
 
-class CoderedPage(Page, metaclass=CoderedPageMeta):
+class CoderedPage(WagtailCacheMixin, Page, metaclass=CoderedPageMeta):
     """
     General use page with caching, templating, and SEO functionality.
     All pages should inherit from this.
     """
     class Meta:
         verbose_name = _('CodeRed Page')
+
     # Do not allow this page type to be created in wagtail admin
     is_creatable = False
 
@@ -108,9 +117,11 @@ class CoderedPage(Page, metaclass=CoderedPageMeta):
     # ajax_template = ''
     # search_template = ''
 
+
     ###############
     # Content fields
     ###############
+
     cover_image = models.ForeignKey(
         'wagtailimages.Image',
         null=True,
@@ -119,6 +130,7 @@ class CoderedPage(Page, metaclass=CoderedPageMeta):
         related_name='+',
         verbose_name=_('Cover image'),
     )
+
 
     ###############
     # Index fields
@@ -129,7 +141,7 @@ class CoderedPage(Page, metaclass=CoderedPageMeta):
 
     # Subclasses can override this to query on a specific
     # page model, rather than the default wagtail Page.
-    index_query_pagemodel = 'wagtailcore.Page'
+    index_query_pagemodel = 'coderedcms.CoderedPage'
 
     # Subclasses can override these fields to enable custom
     # ordering based on specific subpage fields.
@@ -151,19 +163,20 @@ class CoderedPage(Page, metaclass=CoderedPageMeta):
         max_length=255,
         choices=index_order_by_choices,
         default=index_order_by_default,
-        verbose_name=_('Order child pages by'),
         blank=True,
+        verbose_name=_('Order child pages by'),
     )
     index_num_per_page = models.PositiveIntegerField(
         default=10,
         verbose_name=_('Number per page'),
     )
-    tags = ClusterTaggableManager(
-        through=CoderedTag,
-        verbose_name='Tags',
+    index_classifiers = ParentalManyToManyField(
+        'coderedcms.Classifier',
         blank=True,
-        help_text=_('Used to categorize your pages.')
+        verbose_name=_('Filter child pages by'),
+        help_text=_('Enable filtering child pages by these classifiers.'),
     )
+
 
     ###############
     # Layout fields
@@ -295,6 +308,24 @@ class CoderedPage(Page, metaclass=CoderedPageMeta):
 
 
     ###############
+    # Classify
+    ###############
+
+    classifier_terms = ParentalManyToManyField(
+        'coderedcms.ClassifierTerm',
+        blank=True,
+        verbose_name=_('Classifiers'),
+        help_text=_('Categorize and group pages together with classifiers. Used to organize and filter pages across the site.'),
+    )
+    tags = ClusterTaggableManager(
+        through=CoderedTag,
+        blank=True,
+        verbose_name=_('Tags'),
+        help_text=_('Used to organize pages across the site.'),
+    )
+
+
+    ###############
     # Settings
     ###############
 
@@ -305,6 +336,7 @@ class CoderedPage(Page, metaclass=CoderedPageMeta):
         blank=True,
         verbose_name=_('Content Walls')
     )
+
 
     ###############
     # Search
@@ -328,7 +360,9 @@ class CoderedPage(Page, metaclass=CoderedPageMeta):
         index.FilterField('index_show_subpages'),
         index.FilterField('index_order_by'),
         index.FilterField('custom_template'),
+        index.FilterField('classifier_terms'),
     ]
+
 
     ###############
     # Panels
@@ -340,7 +374,10 @@ class CoderedPage(Page, metaclass=CoderedPageMeta):
 
     body_content_panels = []
 
-    bottom_content_panels = [
+    bottom_content_panels = []
+
+    classify_panels = [
+        FieldPanel('classifier_terms', widget=ClassifierSelectWidget()),
         FieldPanel('tags'),
     ]
 
@@ -356,6 +393,7 @@ class CoderedPage(Page, metaclass=CoderedPageMeta):
                 FieldPanel('index_show_subpages'),
                 FieldPanel('index_num_per_page'),
                 FieldPanel('index_order_by'),
+                FieldPanel('index_classifiers', widget=forms.CheckboxSelectMultiple()),
             ],
             heading=_('Show Child Pages')
         )
@@ -432,10 +470,11 @@ class CoderedPage(Page, metaclass=CoderedPageMeta):
         Override to "lazy load" the panels overriden by subclasses.
         """
         panels = [
-            ObjectList(cls.content_panels + cls.body_content_panels + cls.bottom_content_panels, heading='Content'),
-            ObjectList(cls.layout_panels, heading='Layout'),
-            ObjectList(cls.promote_panels, heading='SEO', classname="seo"),
-            ObjectList(cls.settings_panels, heading='Settings', classname="settings"),
+            ObjectList(cls.content_panels + cls.body_content_panels + cls.bottom_content_panels, heading=_('Content')),
+            ObjectList(cls.classify_panels, heading=_('Classify')),
+            ObjectList(cls.layout_panels, heading=_('Layout')),
+            ObjectList(cls.promote_panels, heading=_('SEO'), classname="seo"),
+            ObjectList(cls.settings_panels, heading=_('Settings'), classname="settings"),
         ]
 
         if cls.integration_panels:
@@ -481,19 +520,21 @@ class CoderedPage(Page, metaclass=CoderedPageMeta):
 
     def get_index_children(self):
         """
-        Override to return query of subpages as defined by `index_` variables.
+        Returns query of subpages as defined by `index_` variables.
         """
-        if self.index_query_pagemodel and self.index_order_by:
+        if self.index_query_pagemodel:
             querymodel = resolve_model_string(self.index_query_pagemodel, self._meta.app_label)
-            return querymodel.objects.child_of(self).live().order_by(self.index_order_by)
-
-        return super().get_children().live()
+            query = querymodel.objects.child_of(self).live()
+        else:
+            query = self.get_children().live()
+        if self.index_order_by:
+            return query.order_by(self.index_order_by)
+        return query
 
     def get_content_walls(self, check_child_setting=True):
         current_content_walls = []
         if check_child_setting:
             for wall in self.content_walls:
-                content_wall = wall.value
                 if wall.value['show_content_wall_on_children']:
                     current_content_walls.append(wall.value)
         else:
@@ -511,11 +552,34 @@ class CoderedPage(Page, metaclass=CoderedPageMeta):
         context = super().get_context(request)
 
         if self.index_show_subpages:
+            # Get child pages
             all_children = self.get_index_children()
+            # Filter by classifier terms if applicable
+            if len(request.GET) > 0 and self.index_classifiers.exists():
+                # Look up comma separated ClassifierTerm slugs i.e. `/?c=term1-slug,term2-slug`
+                terms = []
+                get_c = request.GET.get('c', None)
+                if get_c:
+                    terms = get_c.split(',')
+                # Else look up individual querystrings i.e. `/?classifier-slug=term1-slug`
+                else:
+                    for classifier in self.index_classifiers.all().only('slug'):
+                        get_term = request.GET.get(classifier.slug, None)
+                        if get_term:
+                            terms.append(get_term)
+                if len(terms) > 0:
+                    selected_terms = ClassifierTerm.objects.filter(slug__in=terms)
+                    context['selected_terms'] = selected_terms
+                    if len(selected_terms) > 0:
+                        try:
+                            for term in selected_terms:
+                                all_children = all_children.filter(classifier_terms=term)
+                        except:
+                            logger.warning("Tried to filter by ClassifierTerm, but <%s.%s ('%s')>.get_index_children() did not return a queryset or is not a queryset of CoderedPage models.", self._meta.app_label, self.__class__.__name__, self.title)
             paginator = Paginator(all_children, self.index_num_per_page)
-            page = request.GET.get('p', 1)
+            pagenum = request.GET.get('p', 1)
             try:
-                paged_children = paginator.page(page)
+                paged_children = paginator.page(pagenum)
             except:
                 paged_children = paginator.page(1)
 
@@ -562,15 +626,15 @@ class CoderedWebPage(CoderedPage):
     @property
     def body_preview(self):
         """
-        A shortened, non-HTML version of the body.
+        A shortened version of the body without HTML tags.
         """
         # add spaces between tags for legibility
         body = str(self.body).replace('>', '> ')
         # strip tags
         body = strip_tags(body)
         # truncate and add ellipses
-
-        return body[:200] + "..." if len(body) > 200 else body
+        preview = body[:200] + "..." if len(body) > 200 else body
+        return mark_safe(preview)
 
     @property
     def page_ptr(self):
@@ -762,16 +826,23 @@ class CoderedEventPage(CoderedWebPage, BaseEvent):
         """
         Gets the next upcoming, or last occurrence if the event has no more occurrences.
         """
-        noc = self.next_occurrence()
-        if noc:
-            return noc
-        else:
+
+        try:
+            noc = self.next_occurrence()
+            if noc:
+                return noc
             aoc = []
             for occurrence in self.occurrences.all():
                 aoc += [instance for instance in occurrence.all_occurrences()]
             if len(aoc) > 0:
                 return aoc[-1] # last one in the list
-            return None
+
+        except AttributeError:
+            # Triggers when a preview is initiated on an EventPage because it uses a FakeQuerySet object.
+            # Here we manually compute the next_occurrence
+            occurrences = [e.next_occurrence() for e in self.occurrences.all()]
+            if occurrences:
+                return sorted(occurrences, key=lambda tup: tup[0])[0]
 
     def query_occurrences(self, num_of_instances_to_return=None, **kwargs):
         """
@@ -846,12 +917,12 @@ class DefaultCalendarViewChoices():
     LIST_MONTH = 'listMonth'
 
     CHOICES = (
-            ('', _('No calendar')),
-            (MONTH, _('Monthly Calendar')),
-            (AGENDA_WEEK, _('Weekly Calendar')),
-            (AGENDA_DAY, _('Daily Calendar')),
-            (LIST_MONTH, _('Calendar List View')),
-        )
+        ('', _('No calendar')),
+        (MONTH, _('Monthly Calendar')),
+        (AGENDA_WEEK, _('Weekly Calendar')),
+        (AGENDA_DAY, _('Daily Calendar')),
+        (LIST_MONTH, _('Calendar List View')),
+    )
 
 class CoderedEventIndexPage(CoderedWebPage):
     """
@@ -867,9 +938,8 @@ class CoderedEventIndexPage(CoderedWebPage):
 
     index_order_by_default = 'next_occurrence'
     index_order_by_choices = (
-            ('next_occurrence', 'Display next occurrence, soonest first'),
-        ) + \
-        CoderedWebPage.index_order_by_choices
+        ('next_occurrence', 'Display next occurrence, soonest first'),
+    ) + CoderedWebPage.index_order_by_choices
 
     default_calendar_view = models.CharField(
         blank=True,
@@ -950,6 +1020,12 @@ class CoderedFormPage(CoderedWebPage):
         blank=True,
         verbose_name=_('Email form submissions to'),
         help_text=_('Optional - email form submissions to this address. Separate multiple addresses by comma.')
+    )
+    reply_address = models.CharField(
+        max_length=255,
+        blank=True,
+        verbose_name=_('Reply-to address'),
+        help_text=_('Optional - to reply to the submitter, specify the email field here. For example, if a form field above is labeled "Your Email", enter: {{ your_email }}')
     )
     subject = models.CharField(
         max_length=255,
@@ -1039,6 +1115,7 @@ class CoderedFormPage(CoderedWebPage):
             [
                 FieldPanel('save_to_database'),
                 FieldPanel('to_address'),
+                FieldPanel('reply_address'),
                 FieldPanel('subject'),
             ],
             _('Form Submissions')
@@ -1166,29 +1243,48 @@ class CoderedFormPage(CoderedWebPage):
             self.send_summary_mail(request, form, processed_data)
 
         if self.confirmation_emails:
+            # Convert form data into a context.
+            context = Context(self.data_to_dict(processed_data))
+            # Render emails as if they are django templates.
             for email in self.confirmation_emails.all():
-                from_address = email.from_address
 
-                if from_address == '':
-                    from_address = GeneralSettings.for_site(request.site).from_email_address
-
+                # Build email message parameters.
+                message_args = {}
+                # From
+                if email.from_address:
+                    template_from_email = Template(email.from_address)
+                    message_args['from_email'] = template_from_email.render(context)
+                else:
+                    genemail = GeneralSettings.for_site(request.site).from_email_address
+                    if genemail:
+                        message_args['from_email'] = genemail
+                # Reply-to
+                if email.reply_address:
+                    template_reply_to = Template(email.reply_address)
+                    message_args['reply_to'] = template_reply_to.render(context).split(',')
+                # CC
+                if email.cc_address:
+                    template_cc = Template(email.cc_address)
+                    message_args['cc'] = template_cc.render(context).split(',')
+                # BCC
+                if email.bcc_address:
+                    template_bcc = Template(email.bcc_address)
+                    message_args['bcc'] = template_bcc.render(context).split(',')
+                # Subject
+                if email.subject:
+                    template_subject = Template(email.subject)
+                    message_args['subject'] = template_subject.render(context)
+                else:
+                    message_args['subject'] = self.title
+                # Body
                 template_body = Template(email.body)
+                message_args['body'] = template_body.render(context)
+                # To
                 template_to = Template(email.to_address)
-                template_from_email = Template(from_address)
-                template_cc = Template(email.cc_address)
-                template_bcc = Template(email.bcc_address)
-                template_subject = Template(email.subject)
-                context = Context(self.data_to_dict(processed_data))
+                message_args['to'] = template_to.render(context).split(',')
 
-                message = EmailMessage(
-                    body=template_body.render(context),
-                    to=template_to.render(context).split(','),
-                    from_email=template_from_email.render(context),
-                    cc=template_cc.render(context).split(','),
-                    bcc=template_bcc.render(context).split(','),
-                    subject=template_subject.render(context),
-                )
-
+                # Send email
+                message = EmailMessage(**message_args)
                 message.content_subtype = 'html'
                 message.send()
 
@@ -1205,16 +1301,36 @@ class CoderedFormPage(CoderedWebPage):
         content = []
         for field in form:
             value = processed_data[field.name]
+            # Convert lists into human readable comma separated strings.
             if isinstance(value, list):
                 value = ', '.join(value)
-            content.append('{0}: {1}'.format(field.label, utils.attempt_protected_media_value_conversion(request, value)))
-        content = '\n'.join(content)
-        send_mail(
-            self.subject,
-            content,
-            GeneralSettings.for_site(Site.objects.get(is_default_site=True)).from_email_address,
-            addresses
-        )
+            content.append('{0}: {1}'.format(
+                field.label,
+                utils.attempt_protected_media_value_conversion(request, value)
+            ))
+        content = '\n\n'.join(content)
+
+        # Build email message parameters
+        message_args = {
+            'body': content,
+            'to': addresses,
+        }
+        if self.subject:
+            message_args['subject'] = self.subject
+        else:
+            message_args['subject'] = self.title
+        genemail = GeneralSettings.for_site(request.site).from_email_address
+        if genemail:
+            message_args['from_email'] = genemail
+        if self.reply_address:
+            # Render reply-to field using form submission as context.
+            context = Context(self.data_to_dict(processed_data))
+            template_reply_to = Template(self.reply_address)
+            message_args['reply_to'] = template_reply_to.render(context).split(',')
+
+        # Send email
+        message = EmailMessage(**message_args)
+        message.send()
 
     def data_to_dict(self, processed_data):
         """
@@ -1242,11 +1358,12 @@ class CoderedFormPage(CoderedWebPage):
 
         context = self.get_context(request)
         context['form_submission'] = form_submission
-        return render(
+        response = render(
             request,
             self.get_landing_page_template(request),
             context
         )
+        return response
 
     def serve_submissions_list_view(self, request, *args, **kwargs):
         """
@@ -1270,11 +1387,12 @@ class CoderedFormPage(CoderedWebPage):
 
         context = self.get_context(request)
         context['form'] = form
-        return render(
+        response = render(
             request,
             self.get_template(request),
             context
         )
+        return response
 
     preview_modes = [
         ('form', _('Form')),
@@ -1416,7 +1534,7 @@ class CoderedLocationPage(CoderedWebPage):
                 self.latitude = g.latlng[0]
                 self.longitude = g.latlng[1]
             except TypeError:
-                """Raised if google denied the request"""
+                # Raised if google denied the request
                 pass
 
         return super(CoderedLocationPage, self).save(*args, **kwargs)

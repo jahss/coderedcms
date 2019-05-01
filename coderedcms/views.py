@@ -78,7 +78,7 @@ def search(request):
                 except:
                     results = None
             else:
-                results = CoderedPage.objects.live().search(search_query)
+                results = CoderedPage.objects.live().order_by('-last_published_at').search(search_query)
 
         # paginate results
         if results:
@@ -120,11 +120,9 @@ def serve_protected_file(request, path):
 
 
 def robots(request):
-    robots = GeneralSettings.for_site(request.site).robots
     return render(
         request,
         'robots.txt',
-        {'robots': robots},
         content_type='text/plain'
     )
 

@@ -16,7 +16,7 @@ from .layout_blocks import * #noqa
 # Collections of blocks commonly used together.
 
 HTML_STREAMBLOCKS = [
-    ('text', blocks.RichTextBlock(icon='fa-file-text-o')),
+    ('text', RichTextBlock(icon='fa-file-text-o')),
     ('button', ButtonBlock()),
     ('image', ImageBlock()),
     ('image_link', ImageLinkBlock()),
@@ -26,13 +26,14 @@ HTML_STREAMBLOCKS = [
     ('quote', QuoteBlock()),
     ('table', TableBlock()),
     ('google_map', EmbedGoogleMapBlock()),
+    ('page_list', PageListBlock()),
+    ('page_preview', PagePreviewBlock()),
 ]
 
 CONTENT_STREAMBLOCKS = HTML_STREAMBLOCKS + [
     ('card', CardBlock()),
     ('carousel', CarouselBlock()),
     ('image_gallery', ImageGalleryBlock()),
-    ('page_list', PageListBlock()),
     ('modal', ModalBlock(HTML_STREAMBLOCKS)),
     ('pricelist', PriceListBlock()),
     ('reusable_content', ReusableContentBlock()),

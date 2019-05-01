@@ -8,6 +8,8 @@ from django.utils import timezone
 from django.utils.html import mark_safe
 from django.utils.formats import localize
 from wagtail.core.models import Collection
+from wagtail.core.rich_text import RichText
+from wagtail.core.templatetags.wagtailcore_tags import richtext
 from wagtail.images.models import Image
 
 from coderedcms import utils, __version__
@@ -61,6 +63,14 @@ def is_menu_item_dropdown(value):
             len(value.get('page', []).get_children().live()) > 0
         )
 
+@register.simple_tag(takes_context=True)
+def is_active_page(context, curr_page, other_page):
+    if hasattr(curr_page, 'get_url') and hasattr(other_page, 'get_url'):
+        curr_url = curr_page.get_url(context['request'])
+        other_url = other_page.get_url(context['request'])
+        return curr_url == other_url
+    return False
+
 @register.simple_tag
 def get_pictures(collection_id):
     collection = Collection.objects.get(id=collection_id)
@@ -79,6 +89,10 @@ def get_searchform(request=None):
     if request:
         return SearchForm(request.GET)
     return SearchForm()
+
+@register.simple_tag
+def get_pageform(page, request):
+    return page.get_form(page=page, user=request.user)
 
 @register.simple_tag
 def process_form_cell(request, cell):
@@ -124,3 +138,14 @@ def structured_data_datetime(dt):
     if dt.time():
         return datetime.strftime(dt, "%Y-%m-%dT%H:%M")
     return datetime.strftime(dt, "%Y-%m-%d")
+
+@register.filter
+def richtext_amp(value):
+
+    if isinstance(value, RichText):
+        value = richtext(value.source)
+    else:
+        value = richtext(value)
+
+    value = utils.convert_to_amp(value)
+    return mark_safe(value)
